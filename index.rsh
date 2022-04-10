@@ -3,7 +3,7 @@
 const common = {
   funded: Fun([], Null),
   ready: Fun([], Null),
-  received: Fun([UInt], Null),
+  recvd: Fun([UInt], Null),
 };
 
 export const main = Reach.App(
@@ -26,28 +26,44 @@ export const main = Reach.App(
     Participant("Bystander", common),
   ],
   (Funder, Receiver, Bystander) => {
-    // 1. the Funder publishes the parameters of the funds and makes the initial deposit;
+    Funder.only(() => {
+      const { receiverAddr, payment, maturity, refund, dormant } = declassify(
+        interact.getParams()
+      );
+    });
     Funder.publish(receiverAddr, payment, maturity, refund, dormant).pay(
       payment
     );
-
-    // 2. the consensus remembers who the Receiver is;
     Receiver.set(receiverAddr);
     commit();
 
-    // 3. Everyone waits for the fund to mature;
-    wait(maturity);
+    each([Funder, Receiver, Bystander], () => {
+      interact.funded();
+    });
+    wait(relativeTime(maturity));
 
-    // 4. the Receiver may extract the funds with a deadline of 'refund'
-    Receiver.publish().timeout(refund, () => {
-      // 5. the Funder may extract the funds with a deadline of dormant
-      Funder.publish().timeout(dormant, () => {
-        // 6. the Bystander may extract the funds with no deadline.
-        Bystander.publish();
-        transfer(payment).to(Bystander);
-        commit();
-        exit();
-      });
+    const giveChance = (Who, then) => {
+      Who.only(() => interact.ready());
+
+      if (then) {
+        Who.publish().timeout(relativeTime(then.deadline), () => then.after());
+      } else {
+        Who.publish();
+      }
+
+      transfer(payment).to(Who);
+      commit();
+      Who.only(() => interact.recvd(payment));
+      exit();
+    };
+
+    giveChance(Receiver, {
+      deadline: refund,
+      after: () =>
+        giveChance(Funder, {
+          deadline: dormant,
+          after: () => giveChance(Bystander, false),
+        }),
     });
   }
 );
